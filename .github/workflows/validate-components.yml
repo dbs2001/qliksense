@@ -1,0 +1,41 @@
+name: Validate changed components
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "qliksense/apps/**"
+      - "qliksense/automations/**"
+      - "qliksense/assets/**"
+      - ".github/scripts/validate_changed_components.sh"
+      - ".github/workflows/validate-components.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Detect and validate components
+    runs-on: ubuntu-latest
+
+    outputs:
+      components: ${{ steps.validate.outputs.components }}
+      has_components: ${{ steps.validate.outputs.has_components }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate changed components
+        id: validate
+        shell: bash
+        run: |
+          .github/scripts/validate_changed_components.sh \
+            "${{ github.base_ref }}"

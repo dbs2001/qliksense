@@ -1,6 +1,6 @@
 {
   "component_key": "app2",
   "display_name": "App 2",
-  "artifact": "app2.txt",
+  "artifact": ["app2.txt"],
   "owner": "facts-team"
 }
