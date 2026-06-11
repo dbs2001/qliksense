@@ -25,12 +25,12 @@ else
 fi
 
 # Derive component folders:
-# qliksense/apps/app1/file      -> qliksense/apps/app1
-# qliksense/assets/mappings/x   -> qliksense/assets/mappings
+# trunk-prototype/apps/app1/file      -> trunk-prototype/apps/app1
+# trunk-prototype/assets/mappings/x   -> trunk-prototype/assets/mappings
 CHANGED_COMPONENTS="$(
   printf '%s\n' "${CHANGED_FILES}" |
   awk -F/ '
-    $1 == "qliksense" &&
+    $1 == "trunk-prototype" &&
     ($2 == "apps" || $2 == "automations" || $2 == "assets") &&
     NF >= 4 {
       print $1 "/" $2 "/" $3
