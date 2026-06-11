@@ -194,99 +194,93 @@ jobs:
           fetch-depth: 0
           path: spaces
 
-      - name: Copy artifacts to simulated UAT space
+      - name: Deploy native artifacts to simulated UAT space
         shell: bash
         run: |
           set -euo pipefail
-
+      
           UAT_ROOT="spaces/mock-spaces/UAT"
-
+      
           mkdir -p "$UAT_ROOT/apps"
           mkdir -p "$UAT_ROOT/automations"
           mkdir -p "$UAT_ROOT/assets"
-
+      
           for PACKAGE_PATH in downloaded-artifacts/*; do
               [[ -d "$PACKAGE_PATH" ]] || continue
-
+      
               MANIFEST="$PACKAGE_PATH/deployment-manifest.json"
-
+      
               if [[ ! -f "$MANIFEST" ]]; then
-                  echo "ERROR: Missing manifest in $PACKAGE_PATH"
+                  echo "ERROR: Missing deployment manifest in $PACKAGE_PATH"
                   exit 1
               fi
-
+      
               COMPONENT_KEY="$(jq -r '.component_key' "$MANIFEST")"
               COMPONENT_TYPE="$(jq -r '.component_type' "$MANIFEST")"
               COMPONENT_VERSION="$(jq -r '.component_version' "$MANIFEST")"
-
+      
+              echo "Deploying component:"
+              echo "  Key:     $COMPONENT_KEY"
+              echo "  Type:    $COMPONENT_TYPE"
+              echo "  Version: $COMPONENT_VERSION"
+      
               case "$COMPONENT_TYPE" in
                   qlik_app)
-                      TARGET_ROOT="$UAT_ROOT/apps"
+                      TARGET_DIR="$UAT_ROOT/apps/$COMPONENT_KEY"
                       ;;
-
+      
                   automation)
-                      TARGET_ROOT="$UAT_ROOT/automations"
+                      TARGET_DIR="$UAT_ROOT/automations/$COMPONENT_KEY"
                       ;;
-
+      
                   asset_bundle)
-                      TARGET_ROOT="$UAT_ROOT/assets"
+                      TARGET_DIR="$UAT_ROOT/assets/$COMPONENT_KEY"
                       ;;
-
+      
                   *)
                       echo "ERROR: Unsupported component type: $COMPONENT_TYPE"
                       exit 1
                       ;;
               esac
-
-              TARGET_PATH="$TARGET_ROOT/$COMPONENT_KEY"
-
-              echo "Deploying $COMPONENT_KEY v$COMPONENT_VERSION"
-              echo "Target: $TARGET_PATH"
-
-              rm -rf "$TARGET_PATH"
-              mkdir -p "$TARGET_PATH"
-
-              cp -R "$PACKAGE_PATH"/. "$TARGET_PATH"/
+      
+              rm -rf "$TARGET_DIR"
+              mkdir -p "$TARGET_DIR"
+      
+              # Copy only the native artifacts declared in the manifest.
+              while IFS= read -r ARTIFACT; do
+                  SOURCE_PATH="$PACKAGE_PATH/$ARTIFACT"
+                  TARGET_PATH="$TARGET_DIR/$ARTIFACT"
+      
+                  if [[ ! -f "$SOURCE_PATH" ]]; then
+                      echo "ERROR: Preserved artifact not found: $SOURCE_PATH"
+                      exit 1
+                  fi
+      
+                  mkdir -p "$(dirname "$TARGET_PATH")"
+                  cp "$SOURCE_PATH" "$TARGET_PATH"
+      
+                  echo "  Copied: $ARTIFACT"
+              done < <(jq -r '.artifacts[]' "$MANIFEST")
           done
-
-      - name: Record UAT deployment
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          UAT_ROOT="spaces/mock-spaces/UAT"
-
-          jq -n \
-            --arg environment "UAT" \
-            --arg source_commit "${{ github.sha }}" \
-            --arg workflow_run_id "${{ github.run_id }}" \
-            --arg deployed_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            '{
-              environment: $environment,
-              source_commit: $source_commit,
-              workflow_run_id: $workflow_run_id,
-              deployed_at: $deployed_at
-            }' \
-            > "$UAT_ROOT/deployment-summary.json"
 
       - name: Commit simulated UAT state
         shell: bash
         working-directory: spaces
         run: |
           set -euo pipefail
-
+      
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
-
+      
           git add mock-spaces/UAT
-
+      
           if git diff --cached --quiet; then
               echo "No simulated UAT changes to commit."
               exit 0
           fi
-
+      
           git commit \
             -m "deploy(UAT): run ${{ github.run_id }} from ${{ github.sha }}"
-
+      
           git push origin spaces
