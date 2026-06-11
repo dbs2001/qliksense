@@ -1,0 +1,177 @@
+name: Build and deploy changed components to UAT
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/**"
+      - "automations/**"
+      - "assets/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-uat
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    name: Detect and validate changed components
+    runs-on: ubuntu-latest
+
+    outputs:
+      matrix: ${{ steps.validate.outputs.matrix }}
+      components: ${{ steps.validate.outputs.components }}
+      has_components: ${{ steps.validate.outputs.has_components }}
+
+    steps:
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Detect changed components
+        id: detect
+        shell: bash
+        run: |
+          bash .github/scripts/detect_changed_components.sh \
+            "${{ github.event.before }}" \
+            "${{ github.sha }}" \
+            "${RUNNER_TEMP}/changed-components.json"
+
+      - name: Validate changed components
+        id: validate
+        shell: bash
+        run: |
+          bash .github/scripts/validate_components.sh \
+            "${{ github.event.before }}" \
+            "${RUNNER_TEMP}/changed-components.json" \
+            "${RUNNER_TEMP}/validated-components.json"
+
+      - name: Upload analysis reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-analysis-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/changed-components.json
+            ${{ runner.temp }}/validated-components.json
+          if-no-files-found: error
+          retention-days: 30
+
+  package-and-deploy:
+    name: Deploy ${{ matrix.component.component_key }} v${{ matrix.component.version }} to UAT
+    needs:
+      - analyze
+
+    if: needs.analyze.outputs.has_components == 'true'
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: UAT
+
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.analyze.outputs.matrix).include }}
+
+    steps:
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Prepare immutable component package
+        id: package
+        shell: bash
+        env:
+          COMPONENT_KEY: ${{ matrix.component.component_key }}
+          COMPONENT_TYPE: ${{ matrix.component.component_type }}
+          COMPONENT_PATH: ${{ matrix.component.component_path }}
+          COMPONENT_VERSION: ${{ matrix.component.version }}
+          ARTIFACTS_JSON: ${{ toJSON(matrix.component.artifacts) }}
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="${COMPONENT_KEY}-v${COMPONENT_VERSION}"
+          PACKAGE_ROOT="dist/${PACKAGE_NAME}"
+
+          mkdir -p "$PACKAGE_ROOT"
+
+          cp "${COMPONENT_PATH}/meta.json" "$PACKAGE_ROOT/meta.json"
+          cp "${COMPONENT_PATH}/VERSION" "$PACKAGE_ROOT/VERSION"
+
+          while IFS= read -r ARTIFACT; do
+              SOURCE_PATH="${COMPONENT_PATH}/${ARTIFACT}"
+              TARGET_PATH="${PACKAGE_ROOT}/${ARTIFACT}"
+
+              mkdir -p "$(dirname "$TARGET_PATH")"
+              cp "$SOURCE_PATH" "$TARGET_PATH"
+          done < <(jq -r '.[]' <<< "$ARTIFACTS_JSON")
+
+          jq -n \
+            --arg component_key "$COMPONENT_KEY" \
+            --arg component_type "$COMPONENT_TYPE" \
+            --arg component_version "$COMPONENT_VERSION" \
+            --arg source_commit "${{ github.sha }}" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg target_environment "UAT" \
+            --argjson artifacts "$ARTIFACTS_JSON" \
+            '{
+                component_key: $component_key,
+                component_type: $component_type,
+                component_version: $component_version,
+                source_commit: $source_commit,
+                workflow_run_id: $workflow_run_id,
+                target_environment: $target_environment,
+                artifacts: $artifacts
+            }' \
+            > "$PACKAGE_ROOT/deployment-manifest.json"
+
+          (
+              cd "$PACKAGE_ROOT"
+
+              find . \
+                -type f \
+                ! -name "checksums.sha256" \
+                -print0 |
+              sort -z |
+              xargs -0 sha256sum > checksums.sha256
+          )
+
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "package_path=$PACKAGE_ROOT" >> "$GITHUB_OUTPUT"
+
+          echo "Package created:"
+          find "$PACKAGE_ROOT" -type f -print
+
+          echo
+          echo "Deployment manifest:"
+          jq . "$PACKAGE_ROOT/deployment-manifest.json"
+
+          echo
+          echo "Checksums:"
+          cat "$PACKAGE_ROOT/checksums.sha256"
+
+      - name: Upload immutable component package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.package_name }}
+          path: ${{ steps.package.outputs.package_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Simulate deployment to UAT
+        shell: bash
+        run: |
+          echo "=================================================="
+          echo "UAT deployment completed"
+          echo "Component: ${{ matrix.component.component_key }}"
+          echo "Version:   ${{ matrix.component.version }}"
+          echo "Type:      ${{ matrix.component.component_type }}"
+          echo "Commit:    ${{ github.sha }}"
+          echo "Run ID:    ${{ github.run_id }}"
+          echo "=================================================="

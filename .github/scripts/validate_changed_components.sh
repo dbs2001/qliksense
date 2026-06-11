@@ -2,202 +2,294 @@
 
 set -euo pipefail
 
-BASE_REF="${1:-main}"
+BASE_SHA="${1:?BASE_SHA is required}"
+DETECTION_FILE="${2:?Detection JSON file is required}"
+OUTPUT_FILE="${3:-validated-components.json}"
 
 echo "=================================================="
-echo "Validating changed components"
-echo "Base reference: origin/${BASE_REF}"
-echo "Head commit:    ${GITHUB_SHA:-HEAD}"
+echo "Validate changed components"
+echo "Base SHA:      $BASE_SHA"
+echo "Detection:     $DETECTION_FILE"
+echo "Validation out: $OUTPUT_FILE"
 echo "=================================================="
 
-# Find files changed between the PR branch and its common ancestor with main.
-CHANGED_FILES="$(
-  git diff --name-only "origin/${BASE_REF}...HEAD"
-)"
-
-echo
-echo "Changed files:"
-if [[ -n "${CHANGED_FILES}" ]]; then
-  printf '%s\n' "${CHANGED_FILES}"
-else
-  echo "(none)"
+if [[ ! -f "$DETECTION_FILE" ]]; then
+    echo "ERROR: Detection file does not exist: $DETECTION_FILE"
+    exit 1
 fi
 
-# Derive component folders:
-# trunk-prototype/apps/app1/file      -> trunk-prototype/apps/app1
-# trunk-prototype/assets/mappings/x   -> trunk-prototype/assets/mappings
-CHANGED_COMPONENTS="$(
-  printf '%s\n' "${CHANGED_FILES}" |
-  awk -F/ '
-    ($1 == "apps" || $1 == "automations" || $1 == "assets") &&
-    NF >= 3 {
-      print $1 "/" $2
-    }
-  ' |
-  sort -u
-)"
+if ! jq empty "$DETECTION_FILE" >/dev/null 2>&1; then
+    echo "ERROR: Detection file contains invalid JSON."
+    exit 1
+fi
 
-echo
-echo "Changed components:"
-if [[ -n "${CHANGED_COMPONENTS}" ]]; then
-  printf '%s\n' "${CHANGED_COMPONENTS}"
-else
-  echo "(none)"
-  echo "No deployable component changes detected."
-  exit 0
+if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+    echo "ERROR: Base commit does not exist: $BASE_SHA"
+    exit 1
+fi
+
+COMPONENT_COUNT="$(jq '.components | length' "$DETECTION_FILE")"
+
+if [[ "$COMPONENT_COUNT" -eq 0 ]]; then
+    EMPTY_RESULT='{
+      "has_components": false,
+      "components": [],
+      "matrix": {
+        "include": []
+      }
+    }'
+
+    mkdir -p "$(dirname "$OUTPUT_FILE")"
+    printf '%s\n' "$EMPTY_RESULT" > "$OUTPUT_FILE"
+
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+        echo "has_components=false" >> "$GITHUB_OUTPUT"
+    fi
+
+    echo "No deployable components require validation."
+    exit 0
 fi
 
 ERROR_COUNT=0
-COMPONENT_JSON='[]'
+VALIDATED_COMPONENTS='[]'
+
+declare -A SEEN_COMPONENT_KEYS
 
 while IFS= read -r COMPONENT_PATH; do
-  [[ -z "${COMPONENT_PATH}" ]] && continue
 
-  echo
-  echo "--------------------------------------------------"
-  echo "Component: ${COMPONENT_PATH}"
+    [[ -z "$COMPONENT_PATH" ]] && continue
 
-  META_FILE="${COMPONENT_PATH}/meta.json"
-  VERSION_FILE="${COMPONENT_PATH}/VERSION"
+    echo
+    echo "--------------------------------------------------"
+    echo "Component path: $COMPONENT_PATH"
 
-  # Required files
-  if [[ ! -f "${META_FILE}" ]]; then
-    echo "ERROR: Missing ${META_FILE}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-    continue
-  fi
+    META_FILE="$COMPONENT_PATH/meta.json"
+    VERSION_FILE="$COMPONENT_PATH/VERSION"
 
-  if [[ ! -f "${VERSION_FILE}" ]]; then
-    echo "ERROR: Missing ${VERSION_FILE}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-    continue
-  fi
+    if [[ ! -d "$COMPONENT_PATH" ]]; then
+        echo "ERROR: Component directory does not exist: $COMPONENT_PATH"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  # Validate JSON syntax
-  if ! jq empty "${META_FILE}" >/dev/null 2>&1; then
-    echo "ERROR: Invalid JSON in ${META_FILE}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-    continue
-  fi
+    if [[ ! -f "$META_FILE" ]]; then
+        echo "ERROR: Missing metadata file: $META_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  COMPONENT_KEY="$(jq -r '.component_key // empty' "${META_FILE}")"
-  DISPLAY_NAME="$(jq -r '.display_name // empty' "${META_FILE}")"
-  ARTIFACT_COUNT="$(jq '.artifacts | length' "${META_FILE}" 2>/dev/null || echo 0)"
+    if [[ ! -f "$VERSION_FILE" ]]; then
+        echo "ERROR: Missing VERSION file: $VERSION_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  if [[ -z "${COMPONENT_KEY}" ]]; then
-    echo "ERROR: component_key is missing in ${META_FILE}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-  fi
+    if ! jq empty "$META_FILE" >/dev/null 2>&1; then
+        echo "ERROR: Invalid JSON in $META_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  if [[ -z "${DISPLAY_NAME}" ]]; then
-    echo "ERROR: display_name is missing in ${META_FILE}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-  fi
+    COMPONENT_KEY="$(jq -r '.component_key // empty' "$META_FILE")"
+    DISPLAY_NAME="$(jq -r '.display_name // empty' "$META_FILE")"
 
-  if [[ "${ARTIFACT_COUNT}" -eq 0 ]]; then
-    echo "ERROR: artifacts must contain at least one file"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-  fi
+    if [[ -z "$COMPONENT_KEY" ]]; then
+        echo "ERROR: component_key is missing in $META_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  # Current version
-  CURRENT_VERSION="$(
-    tr -d '[:space:]' < "${VERSION_FILE}"
-  )"
+    if [[ ! "$COMPONENT_KEY" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR: Invalid component_key: $COMPONENT_KEY"
+        echo "       Allowed characters: letters, numbers, dot, underscore, hyphen"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  if [[ ! "${CURRENT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "ERROR: VERSION must use MAJOR.MINOR.PATCH: ${CURRENT_VERSION}"
-    ERROR_COUNT=$((ERROR_COUNT + 1))
-    continue
-  fi
+    if [[ -n "${SEEN_COMPONENT_KEYS[$COMPONENT_KEY]:-}" ]]; then
+        echo "ERROR: Duplicate component_key detected: $COMPONENT_KEY"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
 
-  # Read the previous version from the PR base.
-  if git cat-file -e "origin/${BASE_REF}:${VERSION_FILE}" 2>/dev/null; then
-    PREVIOUS_VERSION="$(
-      git show "origin/${BASE_REF}:${VERSION_FILE}" |
-      tr -d '[:space:]'
+    SEEN_COMPONENT_KEYS["$COMPONENT_KEY"]=1
+
+    if [[ -z "$DISPLAY_NAME" ]]; then
+        echo "ERROR: display_name is missing in $META_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+    fi
+
+    if ! jq -e '.artifacts | type == "array" and length > 0' \
+        "$META_FILE" >/dev/null 2>&1; then
+
+        echo "ERROR: artifacts must be a non-empty JSON array in $META_FILE"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
+    fi
+
+    CURRENT_VERSION="$(
+        tr -d '[:space:]' < "$VERSION_FILE"
     )"
 
-    if [[ "${CURRENT_VERSION}" == "${PREVIOUS_VERSION}" ]]; then
-      echo "ERROR: Component changed but VERSION was not increased."
-      echo "       Previous: ${PREVIOUS_VERSION}"
-      echo "       Current:  ${CURRENT_VERSION}"
-      ERROR_COUNT=$((ERROR_COUNT + 1))
-      continue
+    if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "ERROR: VERSION must use MAJOR.MINOR.PATCH."
+        echo "       Current value: $CURRENT_VERSION"
+        ERROR_COUNT=$((ERROR_COUNT + 1))
+        continue
     fi
 
-    # Compare versions using sort -V.
-    HIGHEST_VERSION="$(
-      printf '%s\n%s\n' "${PREVIOUS_VERSION}" "${CURRENT_VERSION}" |
-      sort -V |
-      tail -n 1
+    PREVIOUS_VERSION="new-component"
+
+    if git cat-file -e "${BASE_SHA}:${VERSION_FILE}" 2>/dev/null; then
+
+        PREVIOUS_VERSION="$(
+            git show "${BASE_SHA}:${VERSION_FILE}" |
+            tr -d '[:space:]'
+        )"
+
+        if [[ ! "$PREVIOUS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Previous VERSION is invalid: $PREVIOUS_VERSION"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+
+        if [[ "$CURRENT_VERSION" == "$PREVIOUS_VERSION" ]]; then
+            echo "ERROR: Component changed but VERSION was not increased."
+            echo "       Previous: $PREVIOUS_VERSION"
+            echo "       Current:  $CURRENT_VERSION"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+
+        HIGHEST_VERSION="$(
+            printf '%s\n%s\n' \
+                "$PREVIOUS_VERSION" \
+                "$CURRENT_VERSION" |
+            sort -V |
+            tail -n 1
+        )"
+
+        if [[ "$HIGHEST_VERSION" != "$CURRENT_VERSION" ]]; then
+            echo "ERROR: Component VERSION was decreased."
+            echo "       Previous: $PREVIOUS_VERSION"
+            echo "       Current:  $CURRENT_VERSION"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+    fi
+
+    ARTIFACTS_JSON="$(jq -c '.artifacts' "$META_FILE")"
+
+    while IFS= read -r ARTIFACT; do
+
+        if [[ "$ARTIFACT" == /* ]]; then
+            echo "ERROR: Artifact must use a component-relative path: $ARTIFACT"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+
+        if [[ "$ARTIFACT" == *".."* ]]; then
+            echo "ERROR: Artifact path must not contain '..': $ARTIFACT"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+        fi
+
+        ARTIFACT_PATH="$COMPONENT_PATH/$ARTIFACT"
+
+        if [[ ! -f "$ARTIFACT_PATH" ]]; then
+            echo "ERROR: Declared artifact does not exist: $ARTIFACT_PATH"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+        fi
+
+    done < <(jq -r '.artifacts[]' "$META_FILE")
+
+    COMPONENT_TYPE="$(cut -d/ -f1 <<< "$COMPONENT_PATH")"
+
+    case "$COMPONENT_TYPE" in
+        apps)
+            COMPONENT_TYPE="qlik_app"
+            ;;
+        automations)
+            COMPONENT_TYPE="automation"
+            ;;
+        assets)
+            COMPONENT_TYPE="asset_bundle"
+            ;;
+        *)
+            echo "ERROR: Unsupported component category: $COMPONENT_TYPE"
+            ERROR_COUNT=$((ERROR_COUNT + 1))
+            continue
+            ;;
+    esac
+
+    echo "Component key:    $COMPONENT_KEY"
+    echo "Display name:     $DISPLAY_NAME"
+    echo "Component type:   $COMPONENT_TYPE"
+    echo "Previous version: $PREVIOUS_VERSION"
+    echo "Current version:  $CURRENT_VERSION"
+    echo "Artifacts:        $ARTIFACTS_JSON"
+
+    COMPONENT_ENTRY="$(
+        jq -n \
+            --arg component_key "$COMPONENT_KEY" \
+            --arg display_name "$DISPLAY_NAME" \
+            --arg component_type "$COMPONENT_TYPE" \
+            --arg component_path "$COMPONENT_PATH" \
+            --arg previous_version "$PREVIOUS_VERSION" \
+            --arg version "$CURRENT_VERSION" \
+            --argjson artifacts "$ARTIFACTS_JSON" \
+            '{
+                component_key: $component_key,
+                display_name: $display_name,
+                component_type: $component_type,
+                component_path: $component_path,
+                previous_version: $previous_version,
+                version: $version,
+                artifacts: $artifacts
+            }'
     )"
 
-    if [[ "${HIGHEST_VERSION}" != "${CURRENT_VERSION}" ]]; then
-      echo "ERROR: VERSION was decreased."
-      echo "       Previous: ${PREVIOUS_VERSION}"
-      echo "       Current:  ${CURRENT_VERSION}"
-      ERROR_COUNT=$((ERROR_COUNT + 1))
-      continue
-    fi
-  else
-    PREVIOUS_VERSION="new component"
-  fi
+    VALIDATED_COMPONENTS="$(
+        jq \
+            --argjson component "$COMPONENT_ENTRY" \
+            '. + [$component]' \
+            <<< "$VALIDATED_COMPONENTS"
+    )"
 
-  # Validate artifact declarations.
-  while IFS= read -r ARTIFACT; do
-    if [[ ! -f "${COMPONENT_PATH}/${ARTIFACT}" ]]; then
-      echo "ERROR: Declared artifact does not exist: ${ARTIFACT}"
-      ERROR_COUNT=$((ERROR_COUNT + 1))
-    fi
-  done < <(jq -r '.artifacts[]' "${META_FILE}")
-
-  COMPONENT_TYPE="$(cut -d/ -f2 <<< "${COMPONENT_PATH}")"
-
-  echo "Component key:    ${COMPONENT_KEY}"
-  echo "Component type:   ${COMPONENT_TYPE}"
-  echo "Previous version: ${PREVIOUS_VERSION}"
-  echo "Current version:  ${CURRENT_VERSION}"
-  echo "Status:           validated"
-
-  COMPONENT_ENTRY="$(
-    jq -n \
-      --arg component_key "${COMPONENT_KEY}" \
-      --arg component_type "${COMPONENT_TYPE}" \
-      --arg component_path "${COMPONENT_PATH}" \
-      --arg version "${CURRENT_VERSION}" \
-      '{
-        component_key: $component_key,
-        component_type: $component_type,
-        component_path: $component_path,
-        version: $version
-      }'
-  )"
-
-  COMPONENT_JSON="$(
-    jq \
-      --argjson entry "${COMPONENT_ENTRY}" \
-      '. + [$entry]' \
-      <<< "${COMPONENT_JSON}"
-  )"
-
-done <<< "${CHANGED_COMPONENTS}"
+done < <(jq -r '.components[]' "$DETECTION_FILE")
 
 echo
 echo "=================================================="
 
-if [[ "${ERROR_COUNT}" -gt 0 ]]; then
-  echo "Validation failed with ${ERROR_COUNT} error(s)."
-  exit 1
+if [[ "$ERROR_COUNT" -gt 0 ]]; then
+    echo "Validation failed with $ERROR_COUNT error(s)."
+    exit 1
 fi
 
-echo "Validation successful."
-echo "Changed component matrix:"
-echo "${COMPONENT_JSON}" | jq .
+RESULT="$(
+    jq -n \
+        --argjson components "$VALIDATED_COMPONENTS" \
+        '{
+            has_components: ($components | length > 0),
+            components: $components,
+            matrix: {
+                include: $components
+            }
+        }'
+)"
 
-# Make compact JSON available to later workflow steps.
-COMPACT_JSON="$(jq -c . <<< "${COMPONENT_JSON}")"
+mkdir -p "$(dirname "$OUTPUT_FILE")"
+
+printf '%s\n' "$RESULT" > "$OUTPUT_FILE"
+
+echo "Validation successful."
+echo
+echo "Validated components:"
+jq . "$OUTPUT_FILE"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  echo "components=${COMPACT_JSON}" >> "${GITHUB_OUTPUT}"
-  echo "has_components=true" >> "${GITHUB_OUTPUT}"
+    echo "matrix=$(jq -c '.matrix' "$OUTPUT_FILE")" >> "$GITHUB_OUTPUT"
+    echo "components=$(jq -c '.components' "$OUTPUT_FILE")" >> "$GITHUB_OUTPUT"
+    echo "has_components=true" >> "$GITHUB_OUTPUT"
 fi

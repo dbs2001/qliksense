@@ -4,38 +4,67 @@ on:
   pull_request:
     branches:
       - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
     paths:
       - "apps/**"
       - "automations/**"
       - "assets/**"
-      - ".github/scripts/validate_changed_components.sh"
+      - ".github/scripts/detect_changed_components.sh"
+      - ".github/scripts/validate_components.sh"
       - ".github/workflows/validate-components.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-${{ github.event.pull_request.number }}
+  group: validate-components-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Detect and validate components
+  detect-and-validate:
+    name: Detect and validate changed components
     runs-on: ubuntu-latest
 
     outputs:
+      matrix: ${{ steps.validate.outputs.matrix }}
       components: ${{ steps.validate.outputs.components }}
       has_components: ${{ steps.validate.outputs.has_components }}
 
     steps:
-      - name: Checkout repository
+      - name: Checkout PR head
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
+      - name: Detect changed components
+        id: detect
+        shell: bash
+        run: |
+          bash .github/scripts/detect_changed_components.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${{ github.event.pull_request.head.sha }}" \
+            "${RUNNER_TEMP}/changed-components.json"
 
       - name: Validate changed components
         id: validate
         shell: bash
         run: |
-          bash .github/scripts/validate_changed_components.sh \
-            "${{ github.base_ref }}"
+          bash .github/scripts/validate_components.sh \
+            "${{ github.event.pull_request.base.sha }}" \
+            "${RUNNER_TEMP}/changed-components.json" \
+            "${RUNNER_TEMP}/validated-components.json"
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-validation-${{ github.event.pull_request.number }}
+          path: |
+            ${{ runner.temp }}/changed-components.json
+            ${{ runner.temp }}/validated-components.json
+          if-no-files-found: error
+          retention-days: 14
