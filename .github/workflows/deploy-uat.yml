@@ -187,19 +187,19 @@ jobs:
           set -euo pipefail
           find downloaded-artifacts -type f -print
 
-      - name: Checkout deployment-state branch
+      - name: Checkout spaces branch
         uses: actions/checkout@v4
         with:
-          ref: deployment-state
+          ref: spaces
           fetch-depth: 0
-          path: deployment-state
+          path: spaces
 
       - name: Copy artifacts to simulated UAT space
         shell: bash
         run: |
           set -euo pipefail
 
-          UAT_ROOT="deployment-state/mock-spaces/UAT"
+          UAT_ROOT="spaces/mock-spaces/UAT"
 
           mkdir -p "$UAT_ROOT/apps"
           mkdir -p "$UAT_ROOT/automations"
@@ -254,7 +254,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          UAT_ROOT="deployment-state/mock-spaces/UAT"
+          UAT_ROOT="spaces/mock-spaces/UAT"
 
           jq -n \
             --arg environment "UAT" \
@@ -271,7 +271,7 @@ jobs:
 
       - name: Commit simulated UAT state
         shell: bash
-        working-directory: deployment-state
+        working-directory: spaces
         run: |
           set -euo pipefail
 
@@ -289,4 +289,4 @@ jobs:
           git commit \
             -m "deploy(UAT): run ${{ github.run_id }} from ${{ github.sha }}"
 
-          git push origin deployment-state
+          git push origin spaces
