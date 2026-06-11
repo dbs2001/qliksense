@@ -5,9 +5,9 @@ on:
     branches:
       - main
     paths:
-      - "trunk-prototype/apps/**"
-      - "trunk-prototype/automations/**"
-      - "trunk-prototype/assets/**"
+      - "apps/**"
+      - "automations/**"
+      - "assets/**"
       - ".github/scripts/validate_changed_components.sh"
       - ".github/workflows/validate-components.yml"
 
@@ -37,5 +37,5 @@ jobs:
         id: validate
         shell: bash
         run: |
-          .github/scripts/validate_changed_components.sh \
+          bash .github/scripts/validate_changed_components.sh \
             "${{ github.base_ref }}"

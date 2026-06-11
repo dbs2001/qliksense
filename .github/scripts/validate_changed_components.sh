@@ -3,7 +3,6 @@
 set -euo pipefail
 
 BASE_REF="${1:-main}"
-COMPONENT_ROOT="trunk-prototype"
 
 echo "=================================================="
 echo "Validating changed components"
@@ -30,10 +29,9 @@ fi
 CHANGED_COMPONENTS="$(
   printf '%s\n' "${CHANGED_FILES}" |
   awk -F/ '
-    $1 == "trunk-prototype" &&
-    ($2 == "apps" || $2 == "automations" || $2 == "assets") &&
-    NF >= 4 {
-      print $1 "/" $2 "/" $3
+    ($1 == "apps" || $1 == "automations" || $1 == "assets") &&
+    NF >= 3 {
+      print $1 "/" $2
     }
   ' |
   sort -u
