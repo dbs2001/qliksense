@@ -1,6 +1,0 @@
-component_key: app2
-component_type: qlik_app
-artifact: app2.qvf
-
-dependencies:
-  - qliksense/assets/datasource.csv

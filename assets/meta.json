@@ -1,0 +1,9 @@
+{
+  "component_key": "datasource-config",
+  "display_name": "Datasource Configuration",
+  "artifacts": [
+    "datasource.csv",
+    "mappings.csv"
+  ],
+  "owner": "facts-team"
+}
