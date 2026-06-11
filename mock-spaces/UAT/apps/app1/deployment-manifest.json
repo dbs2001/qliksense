@@ -1,0 +1,11 @@
+{
+  "component_key": "app1",
+  "component_type": "qlik_app",
+  "component_version": "1.0.4",
+  "source_commit": "71e6c430776c3b2bd298f0bceadf53c42e2a2f63",
+  "workflow_run_id": "27347734731",
+  "target_environment": "UAT",
+  "artifacts": [
+    "app1.txt"
+  ]
+}
