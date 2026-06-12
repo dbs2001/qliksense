@@ -1,56 +1,25 @@
 name: Validate changed components
-
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "apps/**"
-      - "automations/**"
-      - "assets/**"
-      - ".github/scripts/**"
-      - ".github/workflows/validate-components.yml"
-
-permissions:
-  contents: read
-
+    paths: ["apps/**", "automations/**", "assets/**", ".github/scripts/**", ".github/workflows/validate-components.yml"]
+permissions: {contents: read}
 concurrency:
   group: validate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
-
 jobs:
   validate:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout PR commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          fetch-tags: true
-
+      - uses: actions/checkout@v4
+        with: {ref: "${{ github.event.pull_request.head.sha }}", fetch-depth: 0, fetch-tags: true}
       - name: Detect changed components
-        run: |
-          bash .github/scripts/detect_changed_components.sh \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" \
-            "${RUNNER_TEMP}/changed-components.json"
-
+        run: bash .github/scripts/detect_changed_components.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}" "${RUNNER_TEMP}/changed-components.json"
       - name: Validate changed components
-        run: |
-          bash .github/scripts/validate_components.sh \
-            "${RUNNER_TEMP}/changed-components.json" \
-            "${RUNNER_TEMP}/validated-components.json"
-
-      - name: Validate release eligibility
-        run: |
-          bash .github/scripts/plan_prerelease_versions.sh \
-            "${RUNNER_TEMP}/changed-components.json" \
-            "${RUNNER_TEMP}/validated-components.json" \
-            "${RUNNER_TEMP}/prerelease-plan.json"
-
-      - name: Upload validation evidence
-        uses: actions/upload-artifact@v4
+        run: bash .github/scripts/validate_components.sh "${RUNNER_TEMP}/changed-components.json" "${RUNNER_TEMP}/validated-components.json"
+      - name: Validate prerelease eligibility
+        run: bash .github/scripts/plan_prerelease_versions.sh "${RUNNER_TEMP}/changed-components.json" "${RUNNER_TEMP}/validated-components.json" "${RUNNER_TEMP}/prerelease-plan.json"
+      - uses: actions/upload-artifact@v4
         with:
           name: validation-pr-${{ github.event.pull_request.number }}
           path: |

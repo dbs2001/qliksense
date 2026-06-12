@@ -1,5 +1,4 @@
 name: Test GitHub environments
-
 on:
   workflow_dispatch:
     inputs:
@@ -7,18 +6,11 @@ on:
         description: Environment to test
         required: true
         type: choice
-        options:
-          - UAT
-          - PROD
-
-permissions:
-  contents: read
-
+        options: [UAT, PROD]
+permissions: {contents: read}
 jobs:
   test:
     runs-on: ubuntu-latest
     environment: ${{ inputs.target }}
-
     steps:
-      - run: |
-          echo "Environment '${{ inputs.target }}' is configured and accessible."
+      - run: echo "Environment '${{ inputs.target }}' is configured and accessible."

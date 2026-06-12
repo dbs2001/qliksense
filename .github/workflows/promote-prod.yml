@@ -1,130 +1,41 @@
-name: Promote approved UAT release to PROD
-
-run-name: Promote ${{ inputs.uat_deployment_tag }} to PROD
-
+name: Promote approved component prerelease to PROD
+run-name: Promote ${{ inputs.uat_prerelease_tag }} to PROD
 on:
   workflow_dispatch:
     inputs:
-      uat_deployment_tag:
-        description: "Published UAT release tag, e.g. uat-deploy/run-123456"
+      uat_prerelease_tag:
+        description: "Approved prerelease tag, e.g. app1-v1.0.1-rc.1"
         required: true
         type: string
-
-permissions:
-  contents: write
-
+permissions: {contents: write}
 concurrency:
   group: prod-promotion
   cancel-in-progress: false
-
 jobs:
   promote:
     runs-on: ubuntu-latest
     environment: PROD
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0, fetch-tags: true}
       - name: Configure Git identity
-        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          
-      - name: Download approved UAT release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UAT_TAG: ${{ inputs.uat_deployment_tag }}
-        run: |
-          mkdir -p uat-release
-          gh release download "$UAT_TAG" \
-            --dir uat-release
-
-      - name: Verify UAT release assets
-        run: |
-          bash .github/scripts/verify_release_assets.sh \
-            uat-release
-
+      - name: Download approved UAT prerelease
+        env: {GH_TOKEN: "${{ github.token }}", UAT_TAG: "${{ inputs.uat_prerelease_tag }}"}
+        run: mkdir -p uat-release && gh release download "$UAT_TAG" --dir uat-release
+      - run: bash .github/scripts/verify_component_release_assets.sh uat-release
       - name: Simulate Qlik PROD deployment
         run: |
-          set -euo pipefail
-
-          while IFS= read -r component; do
-            component_type="$(jq -r '.component_type' <<< "$component")"
-            component_key="$(jq -r '.component_key' <<< "$component")"
-
-            while IFS= read -r asset_name; do
-              bash .github/scripts/qlik_deploy_adapter.sh \
-                "PROD" \
-                "$component_type" \
-                "$component_key" \
-                "uat-release/$asset_name"
-            done < <(jq -r '.artifacts[].release_asset_name' <<< "$component")
-          done < <(jq -c '.components[]' uat-release/deployment-manifest.json)
-
-      - name: Create stable component tags
+          manifest="uat-release/component-manifest.json"; component_type="$(jq -r '.component_type' "$manifest")"; component_key="$(jq -r '.component_key' "$manifest")"
+          while IFS= read -r asset_name; do bash .github/scripts/qlik_deploy_adapter.sh PROD "$component_type" "$component_key" "uat-release/$asset_name"; done < <(jq -r '.artifacts[].release_asset_name' "$manifest")
+      - run: bash .github/scripts/create_stable_tag.sh uat-release/component-manifest.json
+      - name: Create production release
+        env: {GH_TOKEN: "${{ github.token }}"}
         run: |
-          bash .github/scripts/create_stable_tags.sh \
-            uat-release/deployment-manifest.json
-
-      - name: Create production promotion receipt
-        run: |
-          jq -n \
-            --arg production_deployment_id "prod-${{ github.run_id }}" \
-            --arg environment "PROD" \
-            --arg status "success" \
-            --arg uat_deployment_tag "${{ inputs.uat_deployment_tag }}" \
-            --arg workflow_run_id "${{ github.run_id }}" \
-            --arg promoted_by "${{ github.actor }}" \
-            --arg promoted_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            --slurpfile manifest uat-release/deployment-manifest.json \
-            '{
-              production_deployment_id: $production_deployment_id,
-              environment: $environment,
-              status: $status,
-              uat_deployment_tag: $uat_deployment_tag,
-              workflow_run_id: $workflow_run_id,
-              promoted_by: $promoted_by,
-              promoted_at: $promoted_at,
-              components: [
-                $manifest[0].components[] |
-                {
-                  component_key,
-                  prerelease_tag,
-                  stable_tag,
-                  source_commit,
-                  artifacts
-                }
-              ]
-            }' > promotion-receipt.json
-
-      - name: Publish GitHub PROD release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          prod_tag="prod-deploy/run-${{ github.run_id }}"
-          source_commit="$(jq -r '.source_commit' uat-release/deployment-manifest.json)"
-
-          {
-            echo "# Production deployment ${{ github.run_id }}"
-            echo
-            echo "- Source UAT release: \`${{ inputs.uat_deployment_tag }}\`"
-            echo "- Promoted by: \`${{ github.actor }}\`"
-            echo
-            echo "## Components"
-            jq -r '.components[] |
-              "- `\(.stable_tag)` from `\(.prerelease_tag)`"' \
-              uat-release/deployment-manifest.json
-          } > prod-release-notes.md
-
-          gh release create "$prod_tag" \
-            --target "$source_commit" \
-            --title "Production deployment ${{ github.run_id }}" \
-            --notes-file prod-release-notes.md \
-            promotion-receipt.json \
-            uat-release/deployment-manifest.json
+          manifest="uat-release/component-manifest.json"; stable_tag="$(jq -r '.stable_tag' "$manifest")"; prerelease_tag="$(jq -r '.prerelease_tag' "$manifest")"; display_name="$(jq -r '.display_name' "$manifest")"; base_version="$(jq -r '.base_version' "$manifest")"; component_key="$(jq -r '.component_key' "$manifest")"
+          jq -n --arg component_key "$component_key" --arg environment PROD --arg status success --arg prerelease_tag "$prerelease_tag" --arg stable_tag "$stable_tag" --arg promoted_by "${{ github.actor }}" --arg promoted_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" '{component_key:$component_key,environment:$environment,status:$status,prerelease_tag:$prerelease_tag,stable_tag:$stable_tag,promoted_by:$promoted_by,promoted_at:$promoted_at}' > promotion-receipt.json
+          { echo "# ${display_name} v${base_version}"; echo; echo "## Production promotion"; echo; echo "- Source UAT prerelease: \`${prerelease_tag}\`"; echo "- Stable tag: \`${stable_tag}\`"; echo "- Promoted by: \`${{ github.actor }}\`"; if [[ -f uat-release/CHANGELOG.md ]]; then echo; echo "## Changelog"; echo; cat uat-release/CHANGELOG.md; fi; } > prod-release-notes.md
+          assets=(promotion-receipt.json "$manifest"); [[ ! -f uat-release/CHANGELOG.md ]] || assets+=(uat-release/CHANGELOG.md)
+          gh release create "$stable_tag" --verify-tag --title "${display_name} v${base_version}" --notes-file prod-release-notes.md "${assets[@]}"
