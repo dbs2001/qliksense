@@ -116,7 +116,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
-
+        
       - name: Download release plan
         uses: actions/download-artifact@v4
         with:
@@ -153,6 +153,11 @@ jobs:
                 "$artifact_path"
             done < <(jq -r '.artifacts[].release_asset_name' <<< "$component")
           done < <(jq -c '.components[]' deployment-manifest.json)
+      - name: Configure Git identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Create component prerelease tags
         run: |

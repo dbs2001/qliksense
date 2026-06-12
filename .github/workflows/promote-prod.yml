@@ -28,7 +28,12 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-
+      - name: Configure Git identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
       - name: Download approved UAT release assets
         env:
           GH_TOKEN: ${{ github.token }}
