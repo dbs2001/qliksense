@@ -1,9 +1,9 @@
-name: Test GitHub Environments
+name: Test GitHub environments
 
 on:
   workflow_dispatch:
     inputs:
-      target_environment:
+      target:
         description: Environment to test
         required: true
         type: choice
@@ -15,17 +15,10 @@ permissions:
   contents: read
 
 jobs:
-  test-environment:
-    name: Test ${{ inputs.target_environment }}
+  test:
     runs-on: ubuntu-latest
-
-    environment:
-      name: ${{ inputs.target_environment }}
+    environment: ${{ inputs.target }}
 
     steps:
-      - name: Display environment configuration
-        shell: bash
-        run: |
-          echo "Environment: ${{ vars.TARGET_ENVIRONMENT }}"
-          echo "Mock space path: ${{ vars.MOCK_SPACE_PATH }}"
-          echo "Commit: $GITHUB_SHA"
+      - run: |
+          echo "Environment '${{ inputs.target }}' is configured and accessible."

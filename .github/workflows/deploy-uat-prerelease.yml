@@ -1,0 +1,222 @@
+name: Deploy UAT prerelease
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "automations/**"
+      - "assets/**"
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: uat-prerelease-planning
+  cancel-in-progress: false
+
+jobs:
+  analyze-and-plan:
+    runs-on: ubuntu-latest
+    outputs:
+      has_components: ${{ steps.plan.outputs.has_components }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+
+    steps:
+      - name: Checkout workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Detect changed components
+        run: |
+          bash .github/scripts/detect_changed_components.sh \
+            "${{ github.event.before }}" \
+            "${{ github.sha }}" \
+            "${RUNNER_TEMP}/changed-components.json"
+
+      - name: Validate changed components
+        run: |
+          bash .github/scripts/validate_components.sh \
+            "${RUNNER_TEMP}/changed-components.json" \
+            "${RUNNER_TEMP}/validated-components.json"
+
+      - name: Plan prerelease versions
+        id: plan
+        run: |
+          bash .github/scripts/plan_prerelease_versions.sh \
+            "${RUNNER_TEMP}/changed-components.json" \
+            "${RUNNER_TEMP}/validated-components.json" \
+            "${RUNNER_TEMP}/prerelease-plan.json"
+
+      - name: Upload release plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: prerelease-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/prerelease-plan.json
+          retention-days: 14
+
+  prepare-candidates:
+    needs: analyze-and-plan
+    if: needs.analyze-and-plan.outputs.has_components == 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.analyze-and-plan.outputs.matrix) }}
+
+    steps:
+      - name: Checkout workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Prepare component candidate
+        id: prepare
+        env:
+          COMPONENT_JSON: ${{ toJSON(matrix) }}
+        run: |
+          candidate_name="$(
+            bash .github/scripts/prepare_component_candidate.sh \
+              "$COMPONENT_JSON" \
+              "${{ github.sha }}" \
+              "${RUNNER_TEMP}/prepared"
+          )"
+
+          candidate_dir="${RUNNER_TEMP}/prepared/${candidate_name}"
+
+          bash .github/scripts/generate_payload_checksums.sh \
+            "$candidate_dir"
+
+          echo "candidate_name=$candidate_name" >> "$GITHUB_OUTPUT"
+          echo "candidate_dir=$candidate_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload prepared candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare.outputs.candidate_name }}
+          path: ${{ steps.prepare.outputs.candidate_dir }}
+          retention-days: 14
+
+  finalize-uat-prerelease:
+    needs:
+      - analyze-and-plan
+      - prepare-candidates
+    if: needs.analyze-and-plan.outputs.has_components == 'true'
+    runs-on: ubuntu-latest
+    environment: UAT
+
+    steps:
+      - name: Checkout workflow commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download release plan
+        uses: actions/download-artifact@v4
+        with:
+          name: prerelease-plan-${{ github.run_id }}
+          path: plan
+
+      - name: Download all prepared candidates
+        uses: actions/download-artifact@v4
+        with:
+          pattern: prepared-*
+          path: prepared
+
+      - name: Verify prepared candidates and create run manifest
+        run: |
+          bash .github/scripts/verify_prepared_candidates.sh \
+            "plan/prerelease-plan.json" \
+            "prepared" \
+            "deployment-manifest.json"
+
+      - name: Simulate Qlik UAT deployment
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r component; do
+            component_type="$(jq -r '.component_type' <<< "$component")"
+            component_key="$(jq -r '.component_key' <<< "$component")"
+
+            while IFS= read -r asset_name; do
+              artifact_path="$(find prepared -type f -name "$asset_name" -print -quit)"
+              bash .github/scripts/qlik_deploy_adapter.sh \
+                "UAT" \
+                "$component_type" \
+                "$component_key" \
+                "$artifact_path"
+            done < <(jq -r '.artifacts[].release_asset_name' <<< "$component")
+          done < <(jq -c '.components[]' deployment-manifest.json)
+
+      - name: Create component prerelease tags
+        run: |
+          bash .github/scripts/create_prerelease_tags.sh \
+            deployment-manifest.json
+
+      - name: Build long-lived UAT release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          cp deployment-manifest.json release-assets/
+
+          while IFS= read -r component; do
+            component_key="$(jq -r '.component_key' <<< "$component")"
+            candidate_dir="$(find prepared -maxdepth 1 -type d -name "prepared-${component_key}-*" -print -quit)"
+
+            cp "$candidate_dir/${component_key}--component-manifest.json" release-assets/
+            cp "$candidate_dir/${component_key}--meta.json" release-assets/
+            cp "$candidate_dir/${component_key}--payload-checksums.sha256" release-assets/
+            cp "$candidate_dir"/payload/* release-assets/
+          done < <(jq -c '.components[]' deployment-manifest.json)
+
+          jq -n \
+            --arg deployment_id "uat-${{ github.run_id }}" \
+            --arg environment "UAT" \
+            --arg status "success" \
+            --arg source_commit "${{ github.sha }}" \
+            --arg workflow_run_id "${{ github.run_id }}" \
+            --arg deployed_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --slurpfile manifest deployment-manifest.json \
+            '{
+              deployment_id: $deployment_id,
+              environment: $environment,
+              status: $status,
+              source_commit: $source_commit,
+              workflow_run_id: $workflow_run_id,
+              deployed_at: $deployed_at,
+              components: $manifest[0].components
+            }' > release-assets/deployment-receipt.json
+
+      - name: Publish GitHub UAT prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_tag="uat-deploy/run-${{ github.run_id }}"
+
+          {
+            echo "# UAT deployment ${{ github.run_id }}"
+            echo
+            echo "- Source commit: \`${{ github.sha }}\`"
+            echo "- Workflow run: \`${{ github.run_id }}\`"
+            echo
+            echo "## Components"
+            jq -r '.components[] |
+              "- `\(.prerelease_tag)` — \(.component_key)"' \
+              deployment-manifest.json
+          } > release-notes.md
+
+          gh release create "$release_tag" \
+            --target "${{ github.sha }}" \
+            --title "UAT deployment ${{ github.run_id }}" \
+            --notes-file release-notes.md \
+            --prerelease \
+            release-assets/*

@@ -2,31 +2,23 @@ name: Validate changed components
 
 on:
   pull_request:
-    branches:
-      - main
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
+    branches: [main]
     paths:
       - "apps/**"
       - "automations/**"
       - "assets/**"
-      - ".github/scripts/detect_changed_components.sh"
-      - ".github/scripts/validate_components.sh"
+      - ".github/scripts/**"
       - ".github/workflows/validate-components.yml"
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-components-${{ github.event.pull_request.number }}
+  group: validate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  detect-and-validate:
-    name: Detect and validate changed components
+  validate:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,9 +27,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Detect changed components
-        shell: bash
         run: |
           bash .github/scripts/detect_changed_components.sh \
             "${{ github.event.pull_request.base.sha }}" \
@@ -45,28 +37,24 @@ jobs:
             "${RUNNER_TEMP}/changed-components.json"
 
       - name: Validate changed components
-        shell: bash
         run: |
           bash .github/scripts/validate_components.sh \
-            "${{ github.event.pull_request.base.sha }}" \
             "${RUNNER_TEMP}/changed-components.json" \
             "${RUNNER_TEMP}/validated-components.json"
 
-      - name: Display validation result
-        shell: bash
+      - name: Validate release eligibility
         run: |
-          echo "Changed components:"
-          jq . "${RUNNER_TEMP}/changed-components.json"
-
-          echo "Validated components:"
-          jq . "${RUNNER_TEMP}/validated-components.json"
+          bash .github/scripts/plan_prerelease_versions.sh \
+            "${RUNNER_TEMP}/changed-components.json" \
+            "${RUNNER_TEMP}/validated-components.json" \
+            "${RUNNER_TEMP}/prerelease-plan.json"
 
       - name: Upload validation evidence
         uses: actions/upload-artifact@v4
         with:
-          name: component-validation-pr-${{ github.event.pull_request.number }}
+          name: validation-pr-${{ github.event.pull_request.number }}
           path: |
             ${{ runner.temp }}/changed-components.json
             ${{ runner.temp }}/validated-components.json
-          if-no-files-found: error
+            ${{ runner.temp }}/prerelease-plan.json
           retention-days: 14

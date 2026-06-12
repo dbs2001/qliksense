@@ -2,5 +2,6 @@
   "component_key": "app2",
   "display_name": "App 2",
   "artifacts": ["app2.txt"],
-  "owner": "facts-team"
+  "owner": "facts-team",
+  "version": "1.1.0"
 }
